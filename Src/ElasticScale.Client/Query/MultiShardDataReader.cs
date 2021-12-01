@@ -17,7 +17,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
-using System.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using System.Data.SqlTypes;
 using System.Diagnostics;
 using System.Diagnostics.Contracts;
@@ -918,10 +918,10 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.Query
         /// <summary>
         /// This method is currently not supported. Invoking the method will result in an exception.
         /// </summary>
-        public override object InitializeLifetimeService()
-        {
-            throw new NotSupportedException("InitializeLifetimeService is currently not supported");
-        }
+        //public override object InitializeLifetimeService()
+        //{
+        //    throw new NotSupportedException("InitializeLifetimeService is currently not supported");
+        //}
 
         /// <summary>
         /// Gets a value that indicates whether the column contains nonexistent or missing values (NULL values).
