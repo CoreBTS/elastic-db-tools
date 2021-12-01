@@ -42,6 +42,7 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                 { typeof(DateTime), ShardKeyType.DateTime },
                 { typeof(TimeSpan), ShardKeyType.TimeSpan },
                 { typeof(DateTimeOffset), ShardKeyType.DateTimeOffset },
+                { typeof(string), ShardKeyType.String },
             }, LazyThreadSafetyMode.PublicationOnly);
 
         /// <summary>Mapping b/w ShardKeyType and corresponding CLR type.</summary>
@@ -55,6 +56,7 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                 { ShardKeyType.DateTime, typeof(DateTime) },
                 { ShardKeyType.TimeSpan, typeof(TimeSpan) },
                 { ShardKeyType.DateTimeOffset, typeof(DateTimeOffset) },
+                { ShardKeyType.String, typeof(string) },
             }, LazyThreadSafetyMode.PublicationOnly);
 
         /// <summary>Represents negative infinity.</summary>
@@ -282,6 +284,12 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
         {
         }
 
+        /// <summary>
+        /// Constructs a shard key using string value
+        /// </summary>
+        /// <param name="value">Input string value</param>
+        public ShardKey(string value) : this(ShardKeyType.String, ShardKey.Normalize(value), false) { }
+
         /// <summary>Constructs a shard key using given object.</summary>
         /// <param name="value">Input object.</param>
         public ShardKey(object value)
@@ -390,6 +398,10 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
 
                     case ShardKeyType.DateTimeOffset:
                         expectedLength = SizeOfDateTimeOffset;
+                        break;
+
+                    case ShardKeyType.String:
+                        expectedLength = _value.Length; // UTF-8 is one-to-one with bytes
                         break;
 
                     default:
@@ -572,6 +584,8 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                         return this.Value.ToString();
                     case ShardKeyType.Binary:
                         return StringUtils.ByteArrayToString(_value);
+                    case ShardKeyType.String:
+                        return System.Text.Encoding.UTF8.GetString(_value);
                     default:
                         Debug.Assert(_keyType == ShardKeyType.None);
                         Debug.Fail("Unexpected type for string representation.");
@@ -685,6 +699,14 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                 ShardKey interimKeyOther = ShardKey.FromRawValue(ShardKeyType.DateTime, rawOtherValue);
 
                 return interimKeyThis.CompareTo(interimKeyOther);
+            }
+
+            if (KeyType == ShardKeyType.String)
+            {
+                var thisString = System.Text.Encoding.UTF8.GetString(_value);
+                var otherString = System.Text.Encoding.UTF8.GetString(_value);
+
+                return thisString.CompareTo(otherString);
             }
 
             Int32 minLength = Math.Min(_value.Length, other._value.Length);
@@ -943,6 +965,40 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                         ShardKey resKey = ShardKey.FromRawValue(ShardKeyType.DateTimeOffset, bRes);
                         return resKey;
 
+                    case ShardKeyType.String:
+                        // NOTE: string based keys are assumed to be 'prefix-range' keys, so getting the
+                        // next one involves 'adding 1' to the current value (which may bubble up within
+                        // the string)
+                        var denormalizedStringValue = DenormalizeString(_value);
+                        for(var idx = denormalizedStringValue.Length -1; idx >= 0; idx--)
+                        {
+                            // 'Add 1' to the character at the current location, then normalize it and
+                            // see if it's still greater than current, if not, keep adding one
+                            var curChar = denormalizedStringValue[idx].ToString();
+                            var tmpNewChar = denormalizedStringValue[idx];
+                            if (tmpNewChar == Char.MaxValue) { continue; } // we can't make this bigger, so skip ahead
+
+                            while (
+                                tmpNewChar.ToString().ToLowerInvariant().CompareTo(curChar) <= 0
+                                &&
+                                tmpNewChar < Char.MaxValue)
+                            {
+                                tmpNewChar = (char)((int)tmpNewChar + 1);
+                            }
+
+                            if (tmpNewChar.ToString().ToLowerInvariant().CompareTo(curChar) <= 0)
+                            {
+                                return ShardKey.FromRawValue(
+                                    ShardKeyType.String,
+                                    System.Text.Encoding.UTF8.GetBytes(
+                                        denormalizedStringValue.Substring(0, idx) + tmpNewChar
+                                    ));
+                            }
+                        }
+
+                        // There is no larger value...
+                        throw new InvalidOperationException(Errors._ShardKey_MaxValueCannotBeIncremented);
+
                     default:
                         Debug.Fail("Unexpected shard key kind.");
                         break;
@@ -1005,6 +1061,9 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
                 case ShardKeyType.DateTimeOffset:
                     return ShardKey.Normalize((DateTimeOffset)value);
 
+                case ShardKeyType.String:
+                    return ShardKey.Normalize((string)value);
+
                 default:
                     Debug.Assert(keyType == ShardKeyType.Binary);
                     return ShardKey.Normalize((byte[])value);
@@ -1044,6 +1103,9 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
 
                 case ShardKeyType.DateTimeOffset:
                     return DenormalizeDateTimeOffset(value);
+
+                case ShardKeyType.String:
+                    return DenormalizeString(value);
 
                 default:
                     // For varbinary type, we simply keep it as a VarBytes object
@@ -1167,6 +1229,23 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
             else
             {
                 return Normalize(value.Ticks);
+            }
+        }
+
+        /// <summary>
+        /// Converts the given string to a normalized binary representation
+        /// </summary>
+        /// <param name="value">Input string value.</param>
+        /// <returns>Normalized array of bytes.</returns>
+        private static byte[] Normalize(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return ShardKey.s_emptyArray;
+            }
+            else
+            {
+                return System.Text.Encoding.UTF8.GetBytes(value.ToLowerInvariant().TrimEnd());
             }
         }
 
@@ -1299,6 +1378,13 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
             DateTime date = new DateTime(datePart).Add(offset);
             DateTimeOffset result = new DateTimeOffset(date, offset);
             return result;
+        }
+
+        private static string DenormalizeString(byte[] value)
+        {
+            // We CANNOT return the string to a non-normalized (original) variant,
+            // but we can turn it back into a string
+            return System.Text.Encoding.UTF8.GetString(value);
         }
 
         private static byte[] DenormalizeByteArray(byte[] value)

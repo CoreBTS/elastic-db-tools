@@ -4,7 +4,7 @@
 namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
 {
     /// <summary>
-    /// Type of shard key. Currently, only Int32, Int64, Guid and byte[] are the data types supported as shard keys.
+    /// Type of shard key.
     /// </summary>
     public enum ShardKeyType : int
     {
@@ -47,5 +47,10 @@ namespace Microsoft.Azure.SqlDatabase.ElasticScale.ShardManagement
         /// Date and time value with offset.
         /// </summary>
         DateTimeOffset,
+
+        /// <summary>
+        /// Case Insensitive string based key (max &lt;128&gt; UTF-8 characters)
+        /// </summary>
+        String
     }
 }
